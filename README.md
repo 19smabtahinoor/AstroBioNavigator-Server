@@ -1,6 +1,4 @@
-# Astro Bio Navigator - Server API
-
-A Node.js server that provides academic paper search functionality by scraping Google Scholar. This API allows you to search for academic papers related to astronomy, biology, and other scientific fields.
+# Astro Bio Navigator - Server
 
 ## 🚀 Server Setup
 
