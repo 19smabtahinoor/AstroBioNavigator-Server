@@ -9,7 +9,38 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+// Custom middleware to reject missing/invalid Content-Type for JSON endpoints
+app.use((req, res, next) => {
+    if ((req.method === 'POST' || req.method === 'PUT') && req.path.startsWith('/api/')) {
+        const contentType = req.headers['content-type'] || '';
+        if (!contentType.includes('application/json')) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing or invalid Content-Type header. Please use application/json.'
+            });
+        }
+    }
+    next();
+});
+// JSON body parser with error handler
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+// Error handler for JSON parse errors
+app.use((err, req, res, next) => {
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+        return res.status(400).json({
+            success: false,
+            error: 'Malformed JSON in request body.'
+        });
+    }
+    next();
+});
+// Additional middleware for debugging
+app.use((req, res, next) => {
+    console.log(`${req.method} ${req.path}`);
+    console.log('Headers:', req.headers);
+    next();
+});
 
 // Helper function to build valid links
 function buildValidLink(rawLink, domain = 'https://scholar.google.com') {
@@ -40,97 +71,71 @@ function extractAuthors(publicationInfo) {
     return 'N/A';
 }
 
-// Main search function
-async function searchGoogleScholar(keyword, numResults = 10) {
+
+// Main search function using Semantic Scholar API
+async function searchSemanticScholar(keyword, numResults = 10) {
     try {
-        const encodedKeyword = encodeURIComponent(keyword);
-        const url = `https://scholar.google.com/scholar?q=${encodedKeyword}&hl=en`;
-
-        // Make request with proper headers to avoid blocking
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
-            },
-            timeout: 10000
-        });
-
-        const $ = cheerio.load(response.data);
-        const results = [];
-
-        // Parse each search result
-        $('.gs_r.gs_or.gs_scl').each((index, element) => {
-            if (index >= numResults) return false; // Limit results
-
-            const $element = $(element);
-
-            // Extract title and link
-            const titleElement = $element.find('.gs_rt');
-            const title = titleElement.text().trim();
-            const link = buildValidLink(titleElement.find('a').attr('href'));
-
-            // Extract snippet (abstract/description)
-            const snippet = $element.find('.gs_rs').text().trim().replace(/\n/g, ' ');
-
-            // Extract publication info (contains authors, year, journal)
-            const publicationInfo = $element.find('.gs_a').text().trim();
-
-            // Extract authors and year
-            const authors = extractAuthors(publicationInfo);
-            const year = extractYear(publicationInfo);
-
-            // Extract PDF link if available
-            const pdfLink = buildValidLink($element.find('.gs_or_ggsm a').attr('href'));
-
-            // Only add if we have at least a title
-            if (title) {
-                results.push({
-                    title: title,
-                    link: link || 'Not available',
-                    abstract: snippet || 'No abstract available',
-                    authors: authors,
-                    publishYear: year || 'N/A',
-                    publicationInfo: publicationInfo,
-                    pdfLink: pdfLink
-                });
-            }
-        });
-
-        return results;
+        const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(keyword)}&limit=${numResults}&fields=title,authors,year,abstract,url`;
+        const response = await axios.get(url, { timeout: 10000 });
+        if (!response.data || !response.data.data) {
+            return [];
+        }
+        return response.data.data.map(paper => ({
+            title: paper.title || 'No title',
+            link: paper.url || 'Not available',
+            abstract: paper.abstract || 'No abstract available',
+            authors: (paper.authors && paper.authors.length > 0) ? paper.authors.map(a => a.name).join(', ') : 'N/A',
+            publishYear: paper.year || 'N/A',
+            publicationInfo: '',
+            pdfLink: null
+        }));
     } catch (error) {
-        console.error('Error searching Google Scholar:', error.message);
-        throw new Error('Failed to fetch results from Google Scholar');
+        console.error('Error searching Semantic Scholar:', error.message);
+        throw new Error(error.message || 'Failed to fetch results from Semantic Scholar');
     }
 }
 
 // API endpoint for searching papers
 app.post('/api/search-papers', async (req, res) => {
     try {
-        const { keyword, limit = 10 } = req.body;
+        // Debug logging
+        console.log('Content-Type:', req.get('Content-Type'));
+        console.log('Raw body:', req.body);
+        console.log('Body type:', typeof req.body);
+
+        // Fallback: if req.body is undefined, set to empty object
+        const body = req.body || {};
+        const { keyword, limit = 10 } = body;
 
         // Validate input
-        if (!keyword || keyword.trim() === '') {
+        if (!keyword || typeof keyword !== 'string' || keyword.trim() === '') {
             return res.status(400).json({
                 success: false,
-                error: 'Keyword is required'
+                error: 'Keyword is required and must be a non-empty string.'
             });
         }
 
-        if (limit < 1 || limit > 20) {
+        if (typeof limit !== 'number' || limit < 1 || limit > 20) {
             return res.status(400).json({
                 success: false,
-                error: 'Limit must be between 1 and 20'
+                error: 'Limit must be a number between 1 and 20.'
             });
         }
 
         console.log(`Searching for: "${keyword}" with limit: ${limit}`);
 
-        // Perform search
-        const results = await searchGoogleScholar(keyword, limit);
+        // Perform search using Semantic Scholar
+        const results = await searchSemanticScholar(keyword, limit);
+
+        if (!results || results.length === 0) {
+            return res.json({
+                success: true,
+                keyword: keyword,
+                totalResults: 0,
+                papers: [],
+                message: 'No papers found. Try a different keyword.'
+            });
+        }
 
         // Send response
         res.json({
@@ -156,6 +161,22 @@ app.get('/api/health', (req, res) => {
         success: true,
         status: 'API is running',
         timestamp: new Date().toISOString()
+    });
+});
+
+// Test endpoint for debugging POST requests
+app.post('/api/test', (req, res) => {
+    console.log('Test endpoint - Headers:', req.headers);
+    console.log('Test endpoint - Body:', req.body);
+    console.log('Test endpoint - Body type:', typeof req.body);
+
+    res.json({
+        success: true,
+        received: {
+            headers: req.headers,
+            body: req.body,
+            bodyType: typeof req.body
+        }
     });
 });
 

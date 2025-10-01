@@ -58,8 +58,16 @@ Search for academic papers on Google Scholar.
 ### Request Format
 
 - **Method:** POST
-- **Content-Type:** application/json
+- **Content-Type:** application/json (**REQUIRED**)
 - **URL:** `http://localhost:3000/api/search-papers`
+
+⚠️ **Important:** The `Content-Type: application/json` header is required, or you'll get a destructuring error.
+
+### Required Headers
+
+```
+Content-Type: application/json
+```
 
 ### Required Data Structure
 
