@@ -105,7 +105,7 @@ app.post('/api/search-papers', async (req, res) => {
 
         // Fallback: if req.body is undefined, set to empty object
         const body = req.body || {};
-        const { keyword, limit = 10 } = body;
+        const { keyword, limit = 30 } = body;
 
         // Validate input
         if (!keyword || typeof keyword !== 'string' || keyword.trim() === '') {
@@ -115,10 +115,10 @@ app.post('/api/search-papers', async (req, res) => {
             });
         }
 
-        if (typeof limit !== 'number' || limit < 1 || limit > 20) {
+        if (typeof limit !== 'number' || limit < 1) {
             return res.status(400).json({
                 success: false,
-                error: 'Limit must be a number between 1 and 20.'
+                error: 'Limit must be a number greater than 0.'
             });
         }
 

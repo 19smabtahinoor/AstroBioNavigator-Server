@@ -28,14 +28,15 @@ https://astro-bio-navigator-server.vercel.app/api/search-papers
 ```json
 {
   "keyword": "biology",
-  "limit": 10
+  "limit": 100
 }
 ```
 
-| Field   | Type   | Required | Description                               |
-| ------- | ------ | -------- | ----------------------------------------- |
-| keyword | string | Yes      | Search term (e.g. "biology", "exoplanet") |
-| limit   | number | No       | Number of results (default: 10, max: 20)  |
+| Field   | Type                                      | Required | Description                               |
+| ------- | ----------------------------------------- | -------- | ----------------------------------------- |
+| ---     | ----------------------------------------- |
+| keyword | string                                    | Yes      | Search term (e.g. "biology", "exoplanet") |
+| limit   | number                                    | No       | Number of results (default: 10, max: 20)  |
 
 ---
 
