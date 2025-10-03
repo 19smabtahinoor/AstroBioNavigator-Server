@@ -1,3 +1,4 @@
+
 const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
@@ -41,6 +42,232 @@ app.use((req, res, next) => {
     console.log('Headers:', req.headers);
     next();
 });
+
+
+// Trending topics list
+const trendingTopics = [
+    {
+        topic: 'Microgravity Effects on Biology',
+        queries: [
+            'cell biology microgravity',
+            'tissue organ response space',
+            'fluid dynamics microgravity'
+        ]
+    },
+    {
+        topic: 'Origin of Life & Prebiotic Chemistry',
+        queries: [
+            'abiogenesis',
+            'organic molecules space',
+            'planetary conditions for life'
+        ]
+    },
+    {
+        topic: 'Microbial Life in Space',
+        queries: [
+            'extremophiles space',
+            'microbiome spacecraft',
+            'planetary protection contamination'
+        ]
+    },
+    {
+        topic: 'Human Physiology in Space',
+        queries: [
+            'musculoskeletal degradation space',
+            'cardiovascular changes space',
+            'immune system space',
+            'neurovestibular effects space'
+        ]
+    },
+    {
+        topic: 'Space Agriculture & Synthetic Biology',
+        queries: [
+            'plant growth space',
+            'bioregenerative life support',
+            'engineered microbes life support'
+        ]
+    },
+    {
+        topic: 'Neuroscience & Behavior in Space',
+        queries: [
+            'cognitive function space',
+            'sleep circadian rhythms space',
+            'stress response astronauts'
+        ]
+    },
+    {
+        topic: 'Planetary Environments & Habitability',
+        queries: [
+            'mars europa analog',
+            'atmospheric composition planets',
+            'radiation environments planets'
+        ]
+    },
+    {
+        topic: 'Space Radiation Biology',
+        queries: [
+            'DNA damage repair space',
+            'shielding techniques space',
+            'radiation effects reproduction'
+        ]
+    },
+    {
+        topic: 'Omics in Space (Genomics, Proteomics, etc.)',
+        queries: [
+            'transcriptomic response spaceflight',
+            'epigenetics microgravity',
+            'microbial gene expression ISS'
+        ]
+    },
+    {
+        topic: 'Experimental Platforms',
+        queries: [
+            'ISS-based experiments',
+            'ground-based analogs space',
+            'CubeSats biosatellites'
+        ]
+    },
+    {
+        topic: 'Bioinformatics & Modeling in Space Biology',
+        queries: [
+            'predictive models physiological change space',
+            'simulation life-detection missions',
+            'AI omics data space'
+        ]
+    },
+    {
+        topic: 'Earth Analogs for Astrobiology',
+        queries: [
+            'hydrothermal vents astrobiology',
+            'Atacama desert astrobiology',
+            'Antarctic dry valleys astrobiology'
+        ]
+    },
+    {
+        topic: 'Spaceflight Hazards & Mitigation',
+        queries: [
+            'fire safety toxicity space',
+            'contamination control space',
+            'biosecurity space labs'
+        ]
+    },
+    {
+        topic: 'Life Detection & Biosignatures',
+        queries: [
+            'remote sensing biosignatures',
+            'non-Earth-centric biology',
+            'spectral analysis exoplanets'
+        ]
+    },
+    {
+        topic: 'In-situ Resource Utilization (ISRU) Biology',
+        queries: [
+            'bioleaching asteroids',
+            'biomining space',
+            'bioconcrete space construction'
+        ]
+    }
+];
+
+// Helper: fetch trending papers for a query (most cited, recent)
+async function fetchTrendingPapers(query, limit = 9, yearFrom = 2000) {
+    const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(query)}&limit=${limit}&fields=title,authors,year,abstract,url,citationCount`;
+    try {
+        const response = await axios.get(url, { timeout: 10000 });
+        if (!response.data || !response.data.data) return [];
+        // Filter by year and sort by citationCount desc
+        return response.data.data
+            .filter(p => p.year && p.year >= yearFrom)
+            .sort((a, b) => (b.citationCount || 0) - (a.citationCount || 0))
+            .slice(0, limit)
+            .map(paper => ({
+                title: paper.title || 'No title',
+                link: paper.url || 'Not available',
+                abstract: paper.abstract || 'No abstract available',
+                authors: (paper.authors && paper.authors.length > 0) ? paper.authors.map(a => a.name).join(', ') : 'N/A',
+                publishYear: paper.year || 'N/A',
+                citationCount: paper.citationCount || 0,
+                pdfLink: null
+            }));
+    } catch (error) {
+        console.error('Trending fetch error:', error.message);
+        return [];
+    }
+}
+
+// Trending papers endpoint
+app.get('/api/trending-papers', async (req, res) => {
+    try {
+        const yearFrom = parseInt(req.query.yearFrom) || 2020;
+        const limit = parseInt(req.query.limit) || 3;
+        // Fetch all topics in parallel
+        const topicsResults = await Promise.all(trendingTopics.map(async (topicObj) => {
+            // Fetch all queries for this topic in parallel
+            const queriesResults = await Promise.all(topicObj.queries.map(async (q) => {
+                try {
+                    const papers = await fetchTrendingPapers(q, limit, yearFrom);
+                    return { query: q, papers };
+                } catch (err) {
+                    return { query: q, papers: [], error: err.message };
+                }
+            }));
+            return {
+                topic: topicObj.topic,
+                queries: queriesResults
+            };
+        }));
+        res.json({
+            success: true,
+            yearFrom,
+            limit,
+            topics: topicsResults
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: 'Failed to fetch trending papers',
+            message: error.message
+        });
+    }
+});
+
+
+// New endpoint: trending papers by keywords (array)
+app.post('/api/trending-papers-by-keywords', async (req, res) => {
+    try {
+        const { keywords, limit = 3, yearFrom = 2020 } = req.body || {};
+        if (!Array.isArray(keywords) || keywords.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Request body must include a non-empty "keywords" array.'
+            });
+        }
+        const parsedLimit = parseInt(limit) || 3;
+        const parsedYearFrom = parseInt(yearFrom) || 2020;
+        // Fetch trending papers for each keyword in parallel
+        const results = await Promise.all(keywords.map(async (keyword) => {
+            try {
+                const papers = await fetchTrendingPapers(keyword, parsedLimit, parsedYearFrom);
+                return { keyword, papers };
+            } catch (err) {
+                return { keyword, papers: [], error: err.message };
+            }
+        }));
+        res.json({
+            success: true,
+            yearFrom: parsedYearFrom,
+            limit: parsedLimit,
+            results
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: 'Failed to fetch trending papers by keywords',
+            message: error.message
+        });
+    }
+});
+
 
 // Helper function to build valid links
 function buildValidLink(rawLink, domain = 'https://scholar.google.com') {
