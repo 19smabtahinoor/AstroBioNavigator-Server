@@ -195,32 +195,33 @@ async function fetchTrendingPapers(query, limit = 9, yearFrom = 2000) {
     }
 }
 
-// Trending papers endpoint
-app.get('/api/trending-papers', async (req, res) => {
+
+// Trending papers endpoint (POST): accepts keywords array from frontend
+app.post('/api/trending-papers', async (req, res) => {
     try {
-        const yearFrom = parseInt(req.query.yearFrom) || 2020;
-        const limit = parseInt(req.query.limit) || 3;
-        // Fetch all topics in parallel
-        const topicsResults = await Promise.all(trendingTopics.map(async (topicObj) => {
-            // Fetch all queries for this topic in parallel
-            const queriesResults = await Promise.all(topicObj.queries.map(async (q) => {
-                try {
-                    const papers = await fetchTrendingPapers(q, limit, yearFrom);
-                    return { query: q, papers };
-                } catch (err) {
-                    return { query: q, papers: [], error: err.message };
-                }
-            }));
-            return {
-                topic: topicObj.topic,
-                queries: queriesResults
-            };
+        const { keywords, limit = 3, yearFrom = 2020 } = req.body || {};
+        if (!Array.isArray(keywords) || keywords.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'Request body must include a non-empty "keywords" array.'
+            });
+        }
+        const parsedLimit = parseInt(limit) || 3;
+        const parsedYearFrom = parseInt(yearFrom) || 2020;
+        // Fetch trending papers for each keyword in parallel
+        const results = await Promise.all(keywords.map(async (keyword) => {
+            try {
+                const papers = await fetchTrendingPapers(keyword, parsedLimit, parsedYearFrom);
+                return { keyword, papers };
+            } catch (err) {
+                return { keyword, papers: [], error: err.message };
+            }
         }));
         res.json({
             success: true,
-            yearFrom,
-            limit,
-            topics: topicsResults
+            yearFrom: parsedYearFrom,
+            limit: parsedLimit,
+            results
         });
     } catch (error) {
         res.status(500).json({
