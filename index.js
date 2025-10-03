@@ -9,6 +9,7 @@ const { JSDOM } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
 const puppeteer = require('puppeteer');
 require('dotenv').config();
+const { getSupabaseClient } = require('./supabaseClient');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -546,6 +547,43 @@ app.get('/api/health', (req, res) => {
         status: 'API is running',
         timestamp: new Date().toISOString()
     });
+});
+
+// Supabase-backed endpoints for profiles table
+app.get('/api/profiles', async (req, res) => {
+    try {
+        const supabase = getSupabaseClient();
+        if (!supabase) return res.status(503).json({ success: false, error: 'Supabase not configured on server.' });
+
+        const { data, error } = await supabase.from('profiles').select('*').limit(100);
+        if (error) {
+            console.error('Supabase error (profiles):', error.message || error);
+            return res.status(500).json({ success: false, error: 'Failed to fetch profiles from Supabase', details: error.message || error });
+        }
+        res.json({ success: true, count: (data || []).length, profiles: data });
+    } catch (err) {
+        console.error('Profiles fetch error:', err.message || err);
+        res.status(500).json({ success: false, error: 'Internal server error', message: err.message });
+    }
+});
+
+app.get('/api/profiles/:id', async (req, res) => {
+    try {
+        const supabase = getSupabaseClient();
+        if (!supabase) return res.status(503).json({ success: false, error: 'Supabase not configured on server.' });
+
+        const id = req.params.id;
+        const { data, error } = await supabase.from('profiles').select('*').eq('id', id).limit(1).single();
+        if (error) {
+            console.error('Supabase error (profile by id):', error.message || error);
+            return res.status(500).json({ success: false, error: 'Failed to fetch profile', details: error.message || error });
+        }
+        if (!data) return res.status(404).json({ success: false, error: 'Profile not found' });
+        res.json({ success: true, profile: data });
+    } catch (err) {
+        console.error('Profile fetch error:', err.message || err);
+        res.status(500).json({ success: false, error: 'Internal server error', message: err.message });
+    }
 });
 
 // Test endpoint for debugging POST requests
