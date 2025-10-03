@@ -11,12 +11,17 @@ This server provides a simple academic paper search API using the [Semantic Scho
 ### 1. API Endpoint
 
 **POST** `/api/search-papers`
+**POST** `/api/trending-papers-by-keywords`
 
 **Full URL:**
 
 ```
 https://astro-bio-navigator-server.vercel.app/api/search-papers
 ```
+
+````
+https://astro-bio-navigator-server.vercel.app/api/trending-papers-by-keywords```
+
 
 ### 2. Request Format
 
@@ -30,7 +35,7 @@ https://astro-bio-navigator-server.vercel.app/api/search-papers
   "keyword": "biology",
   "limit": 100
 }
-```
+````
 
 | Field   | Type                                      | Required | Description                               |
 | ------- | ----------------------------------------- | -------- | ----------------------------------------- |
@@ -75,6 +80,77 @@ https://astro-bio-navigator-server.vercel.app/api/search-papers
 
 ---
 
+## 🔥 Trending Papers by Keywords
+
+### POST `/api/trending-papers-by-keywords`
+
+Use this endpoint to get trending (most cited, recent) papers for each keyword/topic you provide.
+
+**Request:**
+
+- Method: POST
+- Content-Type: application/json (required)
+- Body:
+
+```json
+{
+  "keywords": ["astrobiology", "microgravity", "life detection"]
+}
+```
+
+| Field    | Type     | Required | Description                                   |
+| -------- | -------- | -------- | --------------------------------------------- |
+| keywords | string[] | Yes      | Array of topics/keywords to search            |
+| limit    | number   | No       | Number of top papers per keyword (default: 3) |
+| yearFrom | number   | No       | Only include papers from this year onward     |
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "yearFrom": 2021,
+  "limit": 5,
+  "results": [
+    {
+      "keyword": "astrobiology",
+      "papers": [
+        {
+          "title": "...",
+          "link": "...",
+          "abstract": "...",
+          "authors": "...",
+          "publishYear": 2022,
+          "citationCount": 123,
+          "pdfLink": null
+        }
+        // ...more papers
+      ]
+    }
+    // ...more keywords
+  ]
+}
+```
+
+**Error Example:**
+
+```json
+{
+  "success": false,
+  "error": "Request body must include a non-empty \"keywords\" array."
+}
+```
+
+**Example (curl):**
+
+```sh
+curl -X POST https://astro-bio-navigator-server.vercel.app/api/trending-papers-by-keywords \
+  -H "Content-Type: application/json" \
+  -d '{"keywords": ["astrobiology", "microgravity"], "limit": 5, "yearFrom": 2021}'
+```
+
+---
+
 ## 📱 Flutter Integration Example
 
 ### 1. Add Dependencies
@@ -115,6 +191,25 @@ class PaperService {
 			throw Exception('Failed to fetch papers');
 		}
 	}
+
+	Future<List<TrendingPaper>> trendingPapersByKeywords({required List<String> keywords, int limit = 3, int yearFrom = 2020}) async {
+		final url = Uri.parse('$baseUrl/trending-papers-by-keywords');
+		final response = await http.post(
+			url,
+			headers: {'Content-Type': 'application/json'},
+			body: jsonEncode({'keywords': keywords, 'limit': limit, 'yearFrom': yearFrom}),
+		);
+		if (response.statusCode == 200) {
+			final data = jsonDecode(response.body);
+			if (data['success'] == true && data['results'] != null) {
+				return (data['results'] as List).map((e) => TrendingPaper.fromJson(e)).toList();
+			} else {
+				throw Exception(data['error'] ?? 'Unknown error');
+			}
+		} else {
+			throw Exception('Failed to fetch trending papers');
+		}
+	}
 }
 
 class Paper {
@@ -146,6 +241,21 @@ class Paper {
 		pdfLink: json['pdfLink'],
 	);
 }
+
+class TrendingPaper {
+	final String keyword;
+	final List<Paper> papers;
+
+	TrendingPaper({
+		required this.keyword,
+		required this.papers,
+	});
+
+	factory TrendingPaper.fromJson(Map<String, dynamic> json) => TrendingPaper(
+		keyword: json['keyword'] ?? '',
+		papers: (json['papers'] as List).map((e) => Paper.fromJson(e)).toList(),
+	);
+}
 ```
 
 ### 3. Usage Example
@@ -154,6 +264,9 @@ class Paper {
 final service = PaperService();
 final papers = await service.searchPapers(keyword: 'biology', limit: 5);
 print(papers.first.title);
+
+final trending = await service.trendingPapersByKeywords(keywords: ['astrobiology', 'microgravity'], limit: 5, yearFrom: 2021);
+print(trending.first.keyword);
 ```
 
 ---
