@@ -16,22 +16,38 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
+// Body parsers: JSON, urlencoded (form) and plain text
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+app.use(express.text({ type: ['text/*'], limit: '10mb' }));
+// Error handler for JSON parse errors (must come after parsers)
+app.use((err, req, res, next) => {
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+        return res.status(400).json({
+            success: false,
+            error: 'Malformed JSON in request body.'
+        });
+    }
+    next();
+});
+
 // Custom middleware to reject missing/invalid Content-Type for JSON endpoints
+// Tolerant: allow application/json, application/x-www-form-urlencoded, text/*, or a parsed body containing a 'url' field.
 app.use((req, res, next) => {
     if ((req.method === 'POST' || req.method === 'PUT') && req.path.startsWith('/api/')) {
-        const contentType = req.headers['content-type'] || '';
-        if (!contentType.includes('application/json')) {
+        const contentType = (req.headers['content-type'] || '').toLowerCase();
+        const okTypes = ['application/json', 'application/x-www-form-urlencoded'];
+        const hasAcceptableType = okTypes.some(t => contentType.includes(t)) || contentType.startsWith('text/');
+        // If content-type is missing/unknown but body contains a url, allow it (helps some clients)
+        if (!hasAcceptableType && !(req.body && (typeof req.body === 'object' && req.body.url) || (typeof req.body === 'string' && req.body.trim().startsWith('http')))) {
             return res.status(400).json({
                 success: false,
-                error: 'Missing or invalid Content-Type header. Please use application/json.'
+                error: 'Missing or invalid Content-Type header. Please use application/json or application/x-www-form-urlencoded, or send the URL as the raw text body.'
             });
         }
     }
     next();
 });
-// JSON body parser with error handler
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
 // Error handler for JSON parse errors
 app.use((err, req, res, next) => {
     if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
@@ -436,25 +452,150 @@ async function summarizeWithOpenRouter(text) {
     }
 }
 
+// Lightweight fast extraction (no Puppeteer) to return a quick preview summary.
+async function fetchArticleTextFast(url) {
+    // Similar to fetchArticleText but skip Puppeteer and any heavy rendering.
+    const response = await axios.get(url, {
+        responseType: 'text',
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        },
+        timeout: 10000,
+        maxRedirects: 3
+    });
+    const contentType = response.headers['content-type'] || '';
+    if (!contentType.includes('html')) {
+        throw new Error('Only web articles (HTML) are supported for summarization.');
+    }
+    const html = response.data;
+    try {
+        const dom = new JSDOM(html, { url });
+        const reader = new Readability(dom.window.document);
+        const article = reader.parse();
+        if (article && article.textContent && article.textContent.trim().length >= 120) {
+            const text = (article.title ? article.title + '\n\n' : '') + article.textContent;
+            return text.replace(/\s+/g, ' ').trim();
+        }
+    } catch (e) {
+        // ignore and fallback to cheerio
+    }
+    const $ = cheerio.load(html);
+    let text = $('article').text() || $('main').text() || $('#content').text() || $('.post-content').text() || $('.entry-content').text();
+    if (!text || text.trim().length < 100) {
+        text = $('body').find('*').not('script, style, noscript').map(function () { return $(this).text(); }).get().join(' ');
+    }
+    text = text.replace(/\s+/g, ' ').trim();
+    if (!text || text.length < 120) throw new Error('Could not extract sufficient text from the article (fast path).');
+    return text;
+}
+
+// Simple extractive summarizer: return first N sentences (fast)
+function extractiveSummary(text, maxSentences = 3) {
+    if (!text) return '';
+    // split into sentences naively
+    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+    const picked = sentences.slice(0, maxSentences).map(s => s.trim());
+    return picked.join(' ');
+}
+
+// In-memory job store for background summarization
+const summarizationJobs = new Map();
+
+function createJob(payload) {
+    const id = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    const job = {
+        id,
+        status: 'pending', // pending | processing | done | failed
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        url: payload.url,
+        fastSummary: payload.fastSummary || null,
+        result: null,
+        error: null
+    };
+    summarizationJobs.set(id, job);
+    return job;
+}
+
+async function processJob(job) {
+    job.status = 'processing';
+    job.updatedAt = new Date().toISOString();
+    try {
+        // Attempt full extraction using the heavier pipeline (which may use Puppeteer)
+        let fullText = null;
+        try {
+            fullText = await fetchArticleText(job.url);
+        } catch (e) {
+            // fallback: try fast path again
+            console.warn('[processJob] fetchArticleText failed, trying fast path:', e.message);
+            fullText = await fetchArticleTextFast(job.url);
+        }
+        const fullResult = await summarizeWithOpenRouter(fullText);
+        job.result = fullResult;
+        job.status = 'done';
+        job.updatedAt = new Date().toISOString();
+    } catch (err) {
+        console.error('[processJob] summarization failed:', err.message || err);
+        job.error = err.message || String(err);
+        job.status = 'failed';
+        job.updatedAt = new Date().toISOString();
+    }
+}
+
 // POST /api/summarize-article: summarize a research article from a URL
 app.post('/api/summarize-article', async (req, res) => {
     try {
-        const { url } = req.body || {};
-        if (!url || typeof url !== 'string') {
-            return res.status(400).json({ success: false, error: 'Missing or invalid "url" in request body.' });
+        // Accept either JSON { url: 'https://...' } or a plain text body containing the URL
+        let url = null;
+        if (req.body) {
+            if (typeof req.body === 'string') {
+                const trimmed = req.body.trim();
+                if (trimmed.startsWith('http')) url = trimmed;
+            } else if (typeof req.body === 'object' && req.body.url) {
+                url = req.body.url;
+            }
         }
-        // Fetch and extract article text
-        const text = await fetchArticleText(url);
-        if (!text || text.length < 100) {
-            return res.status(400).json({ success: false, error: 'Could not extract sufficient text from the article.' });
+        if (!url || typeof url !== 'string' || !url.startsWith('http')) {
+            return res.status(400).json({ success: false, error: 'Missing or invalid "url" in request body. Send JSON {"url": "https://..."} or raw text body with the URL.' });
         }
-        // Summarize with OpenRouter
-        const result = await summarizeWithOpenRouter(text);
-        res.json({ success: true, url, ...result });
+        // Fast path: extract text quickly (no Puppeteer) and return extractive summary immediately
+        let fastText;
+        try {
+            fastText = await fetchArticleTextFast(url);
+        } catch (fastErr) {
+            console.warn('Fast extraction failed:', fastErr.message);
+            // as fallback, try the heavy extraction once to avoid failing fast for sites that need rendering
+            try {
+                fastText = await fetchArticleText(url);
+            } catch (heavyErr) {
+                console.error('Heavy extraction also failed:', heavyErr.message);
+                return res.status(400).json({ success: false, error: 'Could not extract sufficient text from the article.' });
+            }
+        }
+
+        const fastSummary = extractiveSummary(fastText, 3);
+
+        // Create a background job to produce a full LLM summary and store state in memory
+        const job = createJob({ url, fastSummary });
+        // Schedule processing (fire-and-forget)
+        process.nextTick(() => processJob(job));
+
+        // Return fast summary and job id immediately
+        res.json({ success: true, url, fastSummary, jobId: job.id, message: 'Fast summary returned. Full summary is being generated in background; poll /api/summarize-status/:jobId' });
     } catch (error) {
         console.error('Summarization error:', error.message);
         res.status(500).json({ success: false, error: 'Failed to summarize article', message: error.message });
     }
+});
+
+// Polling endpoint for background summarization job status/result
+app.get('/api/summarize-status/:jobId', (req, res) => {
+    const jobId = req.params.jobId;
+    const job = summarizationJobs.get(jobId);
+    if (!job) return res.status(404).json({ success: false, error: 'Job not found' });
+    res.json({ success: true, job });
 });
 
 // Main search function using Semantic Scholar API
