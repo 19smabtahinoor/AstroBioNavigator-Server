@@ -287,6 +287,60 @@ print(trending.first.keyword);
 
 ---
 
-## 📞 Support
+## � Article Summarization Endpoint
+
+### POST `/api/summarize-article`
+
+Summarize a public web article (HTML) and return an interactive JSON summary suitable for frontend display.
+
+Request:
+
+- Method: POST
+- Content-Type: application/json (required)
+- Body:
+
+```json
+{
+  "url": "https://example.com/some-article"
+}
+```
+
+Response (success):
+
+```json
+{
+  "success": true,
+  "url": "https://example.com/some-article",
+  "summary": "A plain-English summary of the article...",
+  "interactive": {
+    "questions": ["What are the limitations?", "How can I apply this?"],
+    "key_points": ["Point 1", "Point 2"],
+    "call_to_action": "Read the full paper or try X"
+  }
+}
+```
+
+Error examples:
+
+```json
+{ "success": false, "error": "Missing or invalid \"url\" in request body." }
+```
+
+```json
+{
+  "success": false,
+  "error": "Only web articles (HTML) are supported for summarization."
+}
+```
+
+Notes and caveats:
+
+- The endpoint currently supports HTML web articles only (no PDFs).
+- The server first tries to extract main article text using Mozilla Readability; if that fails it falls back to cheerio selectors and finally a headless browser render (Puppeteer) for JS-heavy pages.
+- For best results send public, directly accessible article URLs (not behind paywalls or login).
+- OpenRouter API usage is required; set `OPENROUTER_API_KEY` in your `.env` file.
+- Summarization may take a few seconds and consumes OpenRouter credits.
+
+## �📞 Support
 
 For questions or issues, open an issue on the project repository or contact the maintainer.

@@ -3,6 +3,11 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
+const { JSDOM } = require('jsdom');
+const { Readability } = require('@mozilla/readability');
+const puppeteer = require('puppeteer');
 require('dotenv').config();
 
 const app = express();
@@ -299,6 +304,157 @@ function extractAuthors(publicationInfo) {
     return 'N/A';
 }
 
+// Helper: fetch and extract text from a URL (PDF or HTML)
+async function fetchArticleText(url) {
+    // Use a browser-like request to reduce being blocked or served minimal content
+    const response = await axios.get(url, {
+        responseType: 'text',
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        },
+        timeout: 15000,
+        maxRedirects: 5
+    });
+    const contentType = response.headers['content-type'] || '';
+    if (!contentType.includes('html')) {
+        throw new Error('Only web articles (HTML) are supported for summarization.');
+    }
+
+    const html = response.data;
+    // Try Readability first (best-effort for main article extraction)
+    try {
+        const dom = new JSDOM(html, { url });
+        const reader = new Readability(dom.window.document);
+        const article = reader.parse();
+        if (article && article.textContent && article.textContent.trim().length >= 200) {
+            // Prefer the Readability output
+            const text = (article.title ? article.title + '\n\n' : '') + article.textContent;
+            return text.replace(/\s+/g, ' ').trim();
+        }
+    } catch (e) {
+        // swallow and fallback to cheerio
+        console.warn('Readability extraction failed:', e.message);
+    }
+
+    // If Readability failed or content too small, try a headless browser to render JS-heavy pages
+    try {
+        const browser = await puppeteer.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+        const page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 20000 });
+        const renderedHtml = await page.content();
+        await browser.close();
+
+        // Try Readability on rendered HTML
+        try {
+            const dom2 = new JSDOM(renderedHtml, { url });
+            const reader2 = new Readability(dom2.window.document);
+            const article2 = reader2.parse();
+            if (article2 && article2.textContent && article2.textContent.trim().length >= 100) {
+                const text2 = (article2.title ? article2.title + '\n\n' : '') + article2.textContent;
+                return text2.replace(/\s+/g, ' ').trim();
+            }
+        } catch (e2) {
+            console.warn('Readability on rendered HTML failed:', e2.message);
+        }
+        // Fallback to cheerio on rendered HTML
+        const $render = cheerio.load(renderedHtml);
+        let textRender = $render('article').text() || $render('main').text() || $render('#content').text();
+        if (!textRender || textRender.trim().length < 100) {
+            textRender = $render('body').find('*').not('script, style, noscript').map(function () { return $render(this).text(); }).get().join(' ');
+        }
+        textRender = textRender.replace(/\s+/g, ' ').trim();
+        if (textRender && textRender.length >= 100) return textRender;
+    } catch (puppErr) {
+        console.warn('Puppeteer extraction failed or is unavailable:', puppErr.message);
+    }
+
+    // Fallback: cheerio selectors
+    const $ = cheerio.load(html);
+    let text =
+        $('article').text() ||
+        $('main').text() ||
+        $('#content').text() ||
+        $('.main-content').text() ||
+        $('.post-content').text() ||
+        $('.entry-content').text();
+    if (!text || text.trim().length < 100) {
+        text = $('body').find('*').not('script, style, noscript').map(function () {
+            return $(this).text();
+        }).get().join(' ');
+    }
+    text = text.replace(/\s+/g, ' ').trim();
+    if (!text || text.length < 100) {
+        throw new Error('Could not extract sufficient text from the article.');
+    }
+    return text;
+}
+
+// Helper: summarize text using OpenRouter LLM
+async function summarizeWithOpenRouter(text) {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) throw new Error('Missing OpenRouter API key');
+    // Truncate text if too long for LLM
+    const maxTokens = 8000; // adjust as needed for model
+    // Ask for JSON output with interactive structure
+    const prompt = `Summarize the following web article in an interactive, engaging way for a general science audience. Highlight key findings, methods, and implications. Respond in the following JSON format:\n\n{\n  \"summary\": \"A concise summary in plain English...\",\n  \"interactive\": {\n    \"questions\": [\"...\"],\n    \"key_points\": [\"...\"],\n    \"call_to_action\": \"...\"\n  }\n}\n\nArticle:\n${text.slice(0, 20000)}`;
+    const res = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
+        model: 'openai/gpt-3.5-turbo',
+        messages: [
+            { role: 'system', content: 'You are a helpful scientific research summarizer.' },
+            { role: 'user', content: prompt }
+        ],
+        max_tokens: maxTokens
+    }, {
+        headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+        }
+    });
+    const content = res.data.choices && res.data.choices[0] && res.data.choices[0].message && res.data.choices[0].message.content;
+    if (!content) throw new Error('No summary returned from OpenRouter');
+    // Try to parse as JSON
+    let parsed = null;
+    try {
+        parsed = JSON.parse(content);
+    } catch (e) {
+        // fallback: try to extract JSON from markdown/code block
+        const match = content.match(/\{[\s\S]*\}/);
+        if (match) {
+            try { parsed = JSON.parse(match[0]); } catch (e2) { parsed = null; }
+        }
+    }
+    if (parsed && typeof parsed === 'object' && parsed.summary) {
+        return parsed;
+    } else {
+        // fallback: return as plain summary
+        return { summary: content, interactive: null };
+    }
+}
+
+// POST /api/summarize-article: summarize a research article from a URL
+app.post('/api/summarize-article', async (req, res) => {
+    try {
+        const { url } = req.body || {};
+        if (!url || typeof url !== 'string') {
+            return res.status(400).json({ success: false, error: 'Missing or invalid "url" in request body.' });
+        }
+        // Fetch and extract article text
+        const text = await fetchArticleText(url);
+        if (!text || text.length < 100) {
+            return res.status(400).json({ success: false, error: 'Could not extract sufficient text from the article.' });
+        }
+        // Summarize with OpenRouter
+        const result = await summarizeWithOpenRouter(text);
+        res.json({ success: true, url, ...result });
+    } catch (error) {
+        console.error('Summarization error:', error.message);
+        res.status(500).json({ success: false, error: 'Failed to summarize article', message: error.message });
+    }
+});
 
 // Main search function using Semantic Scholar API
 async function searchSemanticScholar(keyword, numResults = 10) {
