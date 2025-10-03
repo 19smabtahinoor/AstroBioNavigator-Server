@@ -193,9 +193,16 @@ const trendingTopics = [
 
 // Helper: fetch trending papers for a query (most cited, recent)
 async function fetchTrendingPapers(query, limit = 9, yearFrom = 2000) {
+    await waitForRateLimit();
+
     const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(query)}&limit=${limit}&fields=title,authors,year,abstract,url,citationCount`;
     try {
-        const response = await axios.get(url, { timeout: 10000 });
+        const response = await axios.get(url, {
+            timeout: 15000,
+            headers: {
+                'User-Agent': 'AstroBioNavigator/1.0'
+            }
+        });
         if (!response.data || !response.data.data) return [];
         // Filter by year and sort by citationCount desc
         return response.data.data
@@ -213,6 +220,9 @@ async function fetchTrendingPapers(query, limit = 9, yearFrom = 2000) {
             }));
     } catch (error) {
         console.error('Trending fetch error:', error.message);
+        if (error.response?.status === 429) {
+            throw new Error('Rate limit exceeded for trending papers');
+        }
         return [];
     }
 }
@@ -598,26 +608,68 @@ app.get('/api/summarize-status/:jobId', (req, res) => {
     res.json({ success: true, job });
 });
 
-// Main search function using Semantic Scholar API
-async function searchSemanticScholar(keyword, numResults = 10) {
-    try {
-        const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(keyword)}&limit=${numResults}&fields=title,authors,year,abstract,url`;
-        const response = await axios.get(url, { timeout: 10000 });
-        if (!response.data || !response.data.data) {
-            return [];
+// Rate limiting helper
+let lastRequestTime = 0;
+const MIN_REQUEST_INTERVAL = 1000; // 1 second between requests
+
+async function waitForRateLimit() {
+    const now = Date.now();
+    const timeSinceLastRequest = now - lastRequestTime;
+    if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
+        const waitTime = MIN_REQUEST_INTERVAL - timeSinceLastRequest;
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+    lastRequestTime = Date.now();
+}
+
+// Main search function using Semantic Scholar API with retry logic
+async function searchSemanticScholar(keyword, numResults = 10, retries = 3) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            await waitForRateLimit();
+
+            const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(keyword)}&limit=${numResults}&fields=title,authors,year,abstract,url`;
+            const response = await axios.get(url, {
+                timeout: 15000,
+                headers: {
+                    'User-Agent': 'AstroBioNavigator/1.0'
+                }
+            });
+
+            if (!response.data || !response.data.data) {
+                return [];
+            }
+
+            return response.data.data.map(paper => ({
+                title: paper.title || 'No title',
+                link: paper.url || 'Not available',
+                abstract: paper.abstract || 'No abstract available',
+                authors: (paper.authors && paper.authors.length > 0) ? paper.authors.map(a => a.name).join(', ') : 'N/A',
+                publishYear: paper.year || 'N/A',
+                publicationInfo: '',
+                pdfLink: null
+            }));
+        } catch (error) {
+            console.error(`Attempt ${attempt} failed:`, error.message);
+
+            if (error.response?.status === 429) {
+                if (attempt === retries) {
+                    throw new Error('Rate limit exceeded. Please wait a few minutes before trying again.');
+                }
+                // Exponential backoff for rate limit errors
+                const backoffTime = Math.pow(2, attempt) * 2000; // 4s, 8s, 16s
+                console.log(`Rate limited. Waiting ${backoffTime}ms before retry ${attempt + 1}...`);
+                await new Promise(resolve => setTimeout(resolve, backoffTime));
+                continue;
+            }
+
+            if (attempt === retries) {
+                throw new Error(error.message || 'Failed to fetch results from Semantic Scholar');
+            }
+
+            // Wait before retry for other errors
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
         }
-        return response.data.data.map(paper => ({
-            title: paper.title || 'No title',
-            link: paper.url || 'Not available',
-            abstract: paper.abstract || 'No abstract available',
-            authors: (paper.authors && paper.authors.length > 0) ? paper.authors.map(a => a.name).join(', ') : 'N/A',
-            publishYear: paper.year || 'N/A',
-            publicationInfo: '',
-            pdfLink: null
-        }));
-    } catch (error) {
-        console.error('Error searching Semantic Scholar:', error.message);
-        throw new Error(error.message || 'Failed to fetch results from Semantic Scholar');
     }
 }
 
@@ -673,6 +725,17 @@ app.post('/api/search-papers', async (req, res) => {
 
     } catch (error) {
         console.error('Search error:', error);
+
+        // Handle specific error types
+        if (error.message.includes('Rate limit exceeded')) {
+            return res.status(429).json({
+                success: false,
+                error: 'Rate limit exceeded',
+                message: 'Too many requests. Please wait a few minutes before trying again.',
+                retryAfter: 300 // seconds
+            });
+        }
+
         res.status(500).json({
             success: false,
             error: 'Failed to search papers',
