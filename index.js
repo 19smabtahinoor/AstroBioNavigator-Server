@@ -15,7 +15,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
-app.use(cors());
+app.use(cors({
+    origin: ['http://localhost:3000', 'http://localhost:3001', 'http://127.0.0.1:3000', 'http://127.0.0.1:3001'],
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
 // Body parsers: JSON, urlencoded (form) and plain text
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -425,13 +430,26 @@ async function summarizeWithOpenRouter(text) {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) throw new Error('Missing OpenRouter API key');
     // Truncate text if too long for LLM
-    const maxTokens = 8000; // adjust as needed for model
-    // Ask for JSON output with interactive structure
-    const prompt = `Summarize the following web article in an interactive, engaging way for a general science audience. Highlight key findings, methods, and implications. Respond in the following JSON format:\n\n{\n  \"summary\": \"A concise summary in plain English...\",\n  \"interactive\": {\n    \"questions\": [\"...\"],\n    \"key_points\": [\"...\"],\n    \"call_to_action\": \"...\"\n  }\n}\n\nArticle:\n${text.slice(0, 20000)}`;
+    const maxTokens = 2000; // Increased for longer summaries
+    // Ask for comprehensive detailed summary
+    const prompt = `Please provide a comprehensive and detailed summary of the following scientific article. Your summary should be thorough and substantial, including:
+
+1. **Main Purpose/Objective**: What the article aims to achieve or investigate
+2. **Key Findings & Results**: All important discoveries, data, and outcomes
+3. **Methodology & Approach**: How the research was conducted (if applicable)
+4. **Significant Details**: Important statistics, evidence, examples, and supporting information
+5. **Implications & Significance**: What these findings mean for the field
+6. **Conclusions & Future Directions**: Final takeaways and recommended next steps
+
+Make this a detailed, informative summary that captures the full scope and depth of the article. Aim for at least 3-4 substantial paragraphs that give readers a complete understanding of the content.
+
+Article to summarize:
+${text.slice(0, 25000)}`;
+
     const res = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
         model: 'openai/gpt-3.5-turbo',
         messages: [
-            { role: 'system', content: 'You are a helpful scientific research summarizer.' },
+            { role: 'system', content: 'You are an expert scientific research summarizer who creates comprehensive, detailed summaries for academic and research purposes.' },
             { role: 'user', content: prompt }
         ],
         max_tokens: maxTokens
@@ -443,25 +461,12 @@ async function summarizeWithOpenRouter(text) {
     });
     const content = res.data.choices && res.data.choices[0] && res.data.choices[0].message && res.data.choices[0].message.content;
     if (!content) throw new Error('No summary returned from OpenRouter');
-    // Try to parse as JSON
-    let parsed = null;
-    try {
-        parsed = JSON.parse(content);
-    } catch (e) {
-        // fallback: try to extract JSON from markdown/code block
-        const match = content.match(/\{[\s\S]*\}/);
-        if (match) {
-            try { parsed = JSON.parse(match[0]); } catch (e2) { parsed = null; }
-        }
-    }
-    if (parsed && typeof parsed === 'object' && parsed.summary) {
-        return parsed;
-    } else {
-        // fallback: return as plain summary
-        return { summary: content, interactive: null };
-    }
+
+    // Return the comprehensive summary as plain text
+    return content.trim();
 }
 
+// Helper function to validate and normalize summary results
 // Lightweight fast extraction (no Puppeteer) to return a quick preview summary.
 async function fetchArticleTextFast(url) {
     // Similar to fetchArticleText but skip Puppeteer and any heavy rendering.
